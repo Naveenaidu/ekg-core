@@ -635,3 +635,77 @@ readAllRefs m = do
     forM ([(name, ref) | (name, Left ref) <- M.toList m]) $ \ (name, ref) -> do
         val <- sampleOne ref
         return (name, val)
+
+------------------------------------------------------------------------
+-- * Idempodent Version of registering metrics
+
+-- | Allow Registering metrics with same name.
+-- This is needed in cases, when the register function is called
+-- multiple times.
+
+-- For eg: Suppose you have a function 'resolveDBConfig' which is called
+-- whenever the configuration of a database is changed. And internally it
+-- also registers a guage using 'registerGauge' which tracks the number
+-- of connections to the DB. Recalling of 'resolveDBConfig' will throw the
+-- error 'alreadyInUseError'. Thus to avoid these cases, the following
+-- functions are created which ignores the 'alreadyInUseError'.
+
+registerIdempodent
+  :: T.Text
+  -> MetricSampler
+  -> Store
+  -> IO ()
+registerIdempodent name sample store = do
+    atomicModifyIORef (storeState store) $ \ state@State{..} ->
+        case M.member name stateMetrics of
+            False -> let !state' = state {
+                               stateMetrics = M.insert name
+                                              (Left sample)
+                                              stateMetrics
+                             }
+                     in (state', ())
+            -- If the name exists, return back the state as it is
+            True  -> (state {stateMetrics = stateMetrics}, () )
+
+-- | Similar to 'registerCounter' but allows same name for metric
+-- Register a non-negative, monotonically increasing, integer-valued
+-- metric. The provided action to read the value must be thread-safe.
+-- Also see 'createCounter'.
+registerCounter' :: T.Text    -- ^ Counter name
+                -> IO Int64  -- ^ Action to read the current metric value
+                -> Store     -- ^ Metric store
+                -> IO ()
+registerCounter' name sample store =
+    registerIdempodent name (CounterS sample) store
+
+-- | Similar to 'registerGauge' but allows same name for metric
+-- Register an integer-valued metric. The provided action to read
+-- the value must be thread-safe. Also see 'createGauge'.
+registerGauge' :: T.Text    -- ^ Gauge name
+              -> IO Int64  -- ^ Action to read the current metric value
+              -> Store     -- ^ Metric store
+              -> IO ()
+registerGauge' name sample store =
+    registerIdempodent name (GaugeS sample) store
+
+-- | Similar to 'registerLabel' but allows same name for metric
+-- | Register a text metric. The provided action to read the value
+-- must be thread-safe. Also see 'createLabel'.
+registerLabel' :: T.Text     -- ^ Label name
+              -> IO T.Text  -- ^ Action to read the current metric value
+              -> Store      -- ^ Metric store
+              -> IO ()
+registerLabel' name sample store =
+    registerIdempodent name (LabelS sample) store
+
+-- | Similar to 'registerDistribution' but allows same name for metric
+-- | Register a distribution metric. The provided action to read the
+-- value must be thread-safe. Also see 'createDistribution'.
+registerDistribution'
+    :: T.Text                 -- ^ Distribution name
+    -> IO Distribution.Stats  -- ^ Action to read the current metric
+                              -- value
+    -> Store                  -- ^ Metric store
+    -> IO ()
+registerDistribution' name sample store =
+    registerIdempodent name (DistributionS sample) store
